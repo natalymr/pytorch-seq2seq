@@ -80,6 +80,7 @@ class Loss(object):
             raise ValueError("No loss to back propagate.")
         self.acc_loss.backward()
 
+
 class NLLLoss(Loss):
     """ Batch averaged negative log-likelihood loss.
 
@@ -116,6 +117,7 @@ class NLLLoss(Loss):
     def eval_batch(self, outputs, target):
         self.acc_loss += self.criterion(outputs, target)
         self.norm_term += 1
+
 
 class Perplexity(NLLLoss):
     """ Language model perplexity loss.

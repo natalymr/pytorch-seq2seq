@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
 
+
 def _inflate(tensor, times, dim):
         """
         Given a tensor, 'inflates' it along the given dimension by replicating each slice specified number of times (in-place)
@@ -37,6 +38,7 @@ def _inflate(tensor, times, dim):
         repeat_dims = [1] * tensor.dim()
         repeat_dims[dim] = times
         return tensor.repeat(*repeat_dims)
+
 
 class TopKDecoder(torch.nn.Module):
     r"""

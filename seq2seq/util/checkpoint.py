@@ -6,6 +6,7 @@ import shutil
 import torch
 import dill
 
+
 class Checkpoint(object):
     """
     The Checkpoint class manages the saving and loading of a model during training. It allows training to be suspended

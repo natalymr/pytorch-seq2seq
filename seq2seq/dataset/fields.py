@@ -2,6 +2,7 @@ import logging
 
 import torchtext
 
+
 class SourceField(torchtext.data.Field):
     """ Wrapper class of torchtext.data.Field that forces batch_first and include_lengths to be True. """
 
@@ -14,8 +15,13 @@ class SourceField(torchtext.data.Field):
         if kwargs.get('include_lengths') is False:
             logger.warning("Option include_lengths has to be set to use pytorch-seq2seq.  Changed to True.")
         kwargs['include_lengths'] = True
+        if kwargs.get('preprocessing') is None:
+            # in my dataset at eah line were <sos> and <eos>, so at this moment we delete it
+            # this is a bad fix
+            kwargs['preprocessing'] = lambda seq: seq[1:-1]
 
         super(SourceField, self).__init__(**kwargs)
+
 
 class TargetField(torchtext.data.Field):
     """ Wrapper class of torchtext.data.Field that forces batch_first to be True and prepend <sos> and append <eos> to sequences in preprocessing step.
@@ -35,10 +41,17 @@ class TargetField(torchtext.data.Field):
             logger.warning("Option batch_first has to be set to use pytorch-seq2seq.  Changed to True.")
         kwargs['batch_first'] = True
         if kwargs.get('preprocessing') is None:
-            kwargs['preprocessing'] = lambda seq: [self.SYM_SOS] + seq + [self.SYM_EOS]
+
+            # kwargs['preprocessing'] = lambda seq: [self.SYM_SOS] + seq + [self.SYM_EOS]
+            # in my dataset at eah line were <sos> and <eos>, so at this moment we delete it
+            # this is a bad fix
+            kwargs['preprocessing'] = lambda seq: seq[1:-1]
         else:
             func = kwargs['preprocessing']
-            kwargs['preprocessing'] = lambda seq: [self.SYM_SOS] + func(seq) + [self.SYM_EOS]
+            # kwargs['preprocessing'] = lambda seq: [self.SYM_SOS] + func(seq) + [self.SYM_EOS]
+            # in my dataset at eah line were <sos> and <eos>, so at this moment we delete it
+            # this is a bad fix
+            kwargs['preprocessing'] = lambda seq: func(seq[1:-1])
 
         self.sos_id = None
         self.eos_id = None

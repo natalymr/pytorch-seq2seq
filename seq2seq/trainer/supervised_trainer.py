@@ -14,6 +14,7 @@ from seq2seq.loss import NLLLoss
 from seq2seq.optim import Optimizer
 from seq2seq.util.checkpoint import Checkpoint
 
+
 class SupervisedTrainer(object):
     """ The SupervisedTrainer class helps in setting up a training framework in a
     supervised setting.
@@ -74,8 +75,10 @@ class SupervisedTrainer(object):
 
         device = None if torch.cuda.is_available() else -1
         batch_iterator = torchtext.data.BucketIterator(
-            dataset=data, batch_size=self.batch_size,
-            sort=False, sort_within_batch=True,
+            dataset=data,
+            batch_size=self.batch_size,
+            sort=False,
+            sort_within_batch=True,
             sort_key=lambda x: len(x.src),
             device=device, repeat=False)
 
@@ -99,7 +102,6 @@ class SupervisedTrainer(object):
 
                 input_variables, input_lengths = getattr(batch, seq2seq.src_field_name)
                 target_variables = getattr(batch, seq2seq.tgt_field_name)
-
                 loss = self._train_batch(input_variables, input_lengths.tolist(), target_variables, model, teacher_forcing_ratio)
 
                 # Record average loss
@@ -127,11 +129,11 @@ class SupervisedTrainer(object):
 
             epoch_loss_avg = epoch_loss_total / min(steps_per_epoch, step - start_step)
             epoch_loss_total = 0
-            log_msg = "Finished epoch %d: Train %s: %.4f" % (epoch, self.loss.name, epoch_loss_avg)
+            log_msg = "\n\nFinished epoch %d: Train %s: %.4f" % (epoch, self.loss.name, epoch_loss_avg)
             if dev_data is not None:
-                dev_loss, accuracy = self.evaluator.evaluate(model, dev_data)
+                dev_loss, accuracy, bleu = self.evaluator.evaluate(model, dev_data)
                 self.optimizer.update(dev_loss, epoch)
-                log_msg += ", Dev %s: %.4f, Accuracy: %.4f" % (self.loss.name, dev_loss, accuracy)
+                log_msg += ", Dev %s: %.4f, Accuracy: %.4f, \nBleu: %s\n\n" % (self.loss.name, dev_loss, accuracy, bleu)
                 model.train(mode=True)
             else:
                 self.optimizer.update(epoch_loss_avg, epoch)
