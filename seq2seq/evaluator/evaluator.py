@@ -2,14 +2,25 @@ from __future__ import print_function, division
 
 from pathlib import Path
 
-import numpy as np
 import torch
 import torchtext
+
 
 import seq2seq
 from seq2seq.loss import NLLLoss
 
-from results_analyzing.utils import get_bleu_score_for_each_pair, run_perl_script_and_parse_result
+from results_analyzing.utils import run_perl_script_and_parse_result
+
+
+# monkey-patching like a boss: Start
+from torchtext.data import Batch
+batch_old_init = Batch.__init__
+def batch_new_init(self, data=None, dataset=None, device=None):
+    self.data = data
+    batch_old_init(self, data, dataset, device)
+
+Batch.__init__ = batch_new_init
+# monkey-patching like a boss: End
 
 
 class Evaluator(object):
@@ -36,6 +47,7 @@ class Evaluator(object):
             loss (float): loss of the given model on the given dataset
         """
         model.eval()
+
 
         loss = self.loss
         loss.reset()
@@ -67,6 +79,8 @@ class Evaluator(object):
                 acc = other['sequence'][0]
                 for i in range(1, len(other["sequence"])):
                     acc = torch.cat((acc, other['sequence'][i]), 1)
+                # print(f'ACC = {acc}')
+                # print(f'SEQ = {seqlist}')
                 pred_seqs.extend(
                     ' '.join(tgt_vocab.itos[tok] for tok in acc[i]
                              if tgt_vocab.itos[tok] not in specials)

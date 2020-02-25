@@ -79,6 +79,8 @@ else:
     tgt.build_vocab(train, max_size=50000, min_freq=1)
     input_vocab = src.vocab
     output_vocab = tgt.vocab
+    print(f'{output_vocab.stoi}')
+    # print(f'TGT VOCAB = {output_vocab.itos}')
 
     tgt_dev = TargetField()
     tgt_dev.build_vocab(dev, max_size=50000, min_freq=1)
@@ -105,13 +107,14 @@ else:
     optimizer = None
     if not opt.resume:
         # Initialize model
-        hidden_size=128
+        hidden_size = 128
         bidirectional = True
         encoder = EncoderRNN(len(src.vocab), max_len, hidden_size,
                              bidirectional=bidirectional, variable_lengths=True)
         decoder = DecoderRNN(len(tgt.vocab), max_len, hidden_size * 2 if bidirectional else hidden_size,
                              dropout_p=0.2, use_attention=True, bidirectional=bidirectional,
                              eos_id=tgt.eos_id, sos_id=tgt.sos_id)
+        decoder = BahdanauDecoder(hidden_size, len(tgt.vocab))
         seq2seq = Seq2seq(encoder, decoder)
         if torch.cuda.is_available():
             seq2seq.cuda()
@@ -128,13 +131,13 @@ else:
 
     # train
     t = SupervisedTrainer(loss=loss,
-                          batch_size=32,
+                          batch_size=10,
                           checkpoint_every=10,
                           print_every=10,
                           expt_dir=opt.expt_dir)
 
     seq2seq = t.train(seq2seq, train,
-                      num_epochs=100,
+                      num_epochs=1,
                       dev_data=dev,
                       optimizer=optimizer,
                       teacher_forcing_ratio=0.5,

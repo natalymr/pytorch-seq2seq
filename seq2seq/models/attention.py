@@ -39,7 +39,7 @@ class Attention(nn.Module):
     """
     def __init__(self, dim):
         super(Attention, self).__init__()
-        self.linear_out = nn.Linear(dim*2, dim)
+        self.linear_out = nn.Linear(dim * 2, dim)
         self.mask = None
 
     def set_mask(self, mask):
@@ -59,6 +59,7 @@ class Attention(nn.Module):
         attn = torch.bmm(output, context.transpose(1, 2))
         if self.mask is not None:
             attn.data.masked_fill_(self.mask, -float('inf'))
+        print(f'shape: output {output.size()}, context {context.size()} att {attn.size()}')
         attn = F.softmax(attn.view(-1, input_size), dim=1).view(batch_size, -1, input_size)
 
         # (batch, out_len, in_len) * (batch, in_len, dim) -> (batch, out_len, dim)

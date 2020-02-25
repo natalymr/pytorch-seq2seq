@@ -1,6 +1,8 @@
+import torch
 import torch.nn as nn
 
 from .baseRNN import BaseRNN
+
 
 class EncoderRNN(BaseRNN):
     r"""
@@ -73,3 +75,5 @@ class EncoderRNN(BaseRNN):
         if self.variable_lengths:
             output, _ = nn.utils.rnn.pad_packed_sequence(output, batch_first=True)
         return output, hidden
+
+

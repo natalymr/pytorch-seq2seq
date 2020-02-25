@@ -65,12 +65,12 @@ class DecoderRNN(BaseRNN):
     KEY_SEQUENCE = 'sequence'
 
     def __init__(self, vocab_size, max_len, hidden_size,
-            sos_id, eos_id,
-            n_layers=1, rnn_cell='gru', bidirectional=False,
-            input_dropout_p=0, dropout_p=0, use_attention=False):
+                sos_id, eos_id,
+                n_layers=1, rnn_cell='gru', bidirectional=False,
+                input_dropout_p=0, dropout_p=0, use_attention=False):
         super(DecoderRNN, self).__init__(vocab_size, max_len, hidden_size,
-                input_dropout_p, dropout_p,
-                n_layers, rnn_cell)
+                                         input_dropout_p, dropout_p,
+                                         n_layers, rnn_cell)
 
         self.bidirectional_encoder = bidirectional
         self.rnn = self.rnn_cell(hidden_size, hidden_size, n_layers, batch_first=True, dropout=dropout_p)
@@ -90,6 +90,20 @@ class DecoderRNN(BaseRNN):
         self.out = nn.Linear(self.hidden_size, self.output_size)
 
     def forward_step(self, input_var, hidden, encoder_outputs, function):
+        """
+        input_var = list of sequences, whose length is the batch size
+        and within which each sequence is a list of token IDs.
+        It is used for teacher forcing when provided
+        (batch, seq_len, input_size)
+
+        hidden = decoder hidden
+
+        encoder_outputs = tensor with containing the outputs of the encoder.
+        Used for attention mechanism, context vector
+        (batch, seq_len, hidden_size)
+
+        function = A function used to generate symbols from RNN hidden state
+        """
         batch_size = input_var.size(0)
         output_size = input_var.size(1)
         embedded = self.embedding(input_var)
@@ -100,8 +114,11 @@ class DecoderRNN(BaseRNN):
         attn = None
         if self.use_attention:
             output, attn = self.attention(output, encoder_outputs)
+            # output = tensor containing the attended output features from the decoder; (batch, output_len, dimensions)
+            # attn = tensor containing attention weights; (batch, output_len, input_len)
 
-        predicted_softmax = function(self.out(output.contiguous().view(-1, self.hidden_size)), dim=1).view(batch_size, output_size, -1)
+        predicted_softmax = function(self.out(output.contiguous().view(-1, self.hidden_size)), dim=1)\
+            .view(batch_size, output_size, -1)
         return predicted_softmax, hidden, attn
 
     def forward(self, inputs=None, encoder_hidden=None, encoder_outputs=None,
@@ -109,15 +126,14 @@ class DecoderRNN(BaseRNN):
         ret_dict = dict()
         if self.use_attention:
             ret_dict[DecoderRNN.KEY_ATTN_SCORE] = list()
-
+        print(f'DECODE: inputs: {inputs}')
         inputs, batch_size, max_length = self._validate_args(inputs, encoder_hidden, encoder_outputs,
                                                              function, teacher_forcing_ratio)
         decoder_hidden = self._init_state(encoder_hidden)
 
         use_teacher_forcing = True if random.random() < teacher_forcing_ratio else False
 
-        decoder_outputs = []
-        sequence_symbols = []
+        decoder_outputs, sequence_symbols = [], []
         lengths = np.array([max_length] * batch_size)
 
         def decode(step, step_output, step_attn):
@@ -138,8 +154,9 @@ class DecoderRNN(BaseRNN):
         # If teacher_forcing_ratio is True or False instead of a probability, the unrolling can be done in graph
         if use_teacher_forcing:
             decoder_input = inputs[:, :-1]
-            decoder_output, decoder_hidden, attn = self.forward_step(decoder_input, decoder_hidden, encoder_outputs,
-                                                                     function=function)
+            print(f'use_teacher_forcing: decoder inputs = {decoder_input}')
+            decoder_output, decoder_hidden, attn = self.forward_step(decoder_input, decoder_hidden,
+                                                                     encoder_outputs, function=function)
 
             for di in range(decoder_output.size(1)):
                 step_output = decoder_output[:, di, :]
@@ -151,8 +168,10 @@ class DecoderRNN(BaseRNN):
         else:
             decoder_input = inputs[:, 0].unsqueeze(1)
             for di in range(max_length):
-                decoder_output, decoder_hidden, step_attn = self.forward_step(decoder_input, decoder_hidden, encoder_outputs,
-                                                                         function=function)
+                print(f'NOT use_teacher_forcing: decoder inputs = {decoder_input}')
+                print(f"decoder: max len {max_length}")
+                decoder_output, decoder_hidden, step_attn = self.forward_step(decoder_input, decoder_hidden,
+                                                                              encoder_outputs, function=function)
                 step_output = decoder_output.squeeze(1)
                 symbols = decode(di, step_output, step_attn)
                 decoder_input = symbols
@@ -206,6 +225,6 @@ class DecoderRNN(BaseRNN):
                 inputs = inputs.cuda()
             max_length = self.max_length
         else:
-            max_length = inputs.size(1) - 1 # minus the start of sequence symbol
+            max_length = inputs.size(1) - 1  # minus the start of sequence symbol
 
         return inputs, batch_size, max_length

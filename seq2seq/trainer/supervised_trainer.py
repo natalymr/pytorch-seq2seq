@@ -2,17 +2,18 @@ from __future__ import division
 import logging
 import os
 import random
-import time
 
 import torch
 import torchtext
 from torch import optim
+import torch.nn.functional as F
 
 import seq2seq
 from seq2seq.evaluator import Evaluator
 from seq2seq.loss import NLLLoss
 from seq2seq.optim import Optimizer
 from seq2seq.util.checkpoint import Checkpoint
+from tqdm import tqdm
 
 
 class SupervisedTrainer(object):
@@ -187,3 +188,71 @@ class SupervisedTrainer(object):
                             start_epoch, step, dev_data=dev_data,
                             teacher_forcing_ratio=teacher_forcing_ratio)
         return model
+
+
+class BahdanauTrainer:
+    def __init__(self, encoder, decoder, encoder_optimizer, decoder_optimizer):
+        self.encoder = encoder
+        self.decoder = decoder
+        self.encoder_optimizer = encoder_optimizer
+        self.decoder_optimizer = decoder_optimizer
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    def train(self, data, epochs, teacher_forcing_prob=0.5):
+        tk0 = tqdm(range(1, epochs + 1), total=epochs)
+        self.encoder.train()
+        self.decoder.train()
+
+        batch_iterator = torchtext.data.BucketIterator(
+            dataset=data,
+            batch_size=self.batch_size,
+            sort=False,
+            repeat=False,
+            sort_within_batch=True,
+            sort_key=lambda x: len(x.src),
+            device=self.device)
+
+        for epoch in epochs:
+            avg_loss = 0.
+            tk1 = tqdm(enumerate(en_inputs), total=len(en_inputs), leave=False)
+            batch_generator = batch_iterator.__iter__()
+
+            for i, sentence in tk1:
+                for batch in batch_generator:
+                    input_variables, input_lengths = getattr(batch, seq2seq.src_field_name)
+                    target_variables = getattr(batch, seq2seq.tgt_field_name)
+
+                loss = 0.
+                h = self.encoder.init_hidden()
+                self.encoder_optimizer.zero_grad()
+                self.decoder_optimizer.zero_grad()
+                inp = torch.tensor(sentence).unsqueeze(0).to(self.device)
+                encoder_outputs, h = self.encoder(inp, h)
+
+                # First decoder input will be the SOS token
+                decoder_input = torch.tensor([en_w2i['_SOS']], device=self.device)
+                # First decoder hidden state will be last encoder hidden state
+                decoder_hidden = h
+                output = []
+                teacher_forcing = True if random.random() < teacher_forcing_prob else False
+
+                for ii in range(len(de_inputs[i])):
+                    decoder_output, decoder_hidden, attn_weights = self.decoder(decoder_input, decoder_hidden,
+                                                                           encoder_outputs)
+                    # Get the index value of the word with the highest score from the decoder output
+                    top_value, top_index = decoder_output.topk(1)
+                    if teacher_forcing:
+                        decoder_input = torch.tensor([de_inputs[i][ii]], device=self.device)
+                    else:
+                        decoder_input = torch.tensor([top_index.item()], device=self.device)
+                    output.append(top_index.item())
+                    # Calculate the loss of the prediction against the actual word
+                    loss += F.nll_loss(decoder_output.view(1, -1), torch.tensor([de_inputs[i][ii]], device=self.device))
+                loss.backward()
+                self.encoder_optimizer.step()
+                self.decoder_optimizer.step()
+                avg_loss += loss.item() / len(en_inputs)
+            tk0.set_postfix(loss=avg_loss)
+        # Save model after every epoch (Optional)
+        torch.save({"encoder": self.encoder.state_dict(), "decoder": self.decoder.state_dict(),
+                    "e_optimizer": self.encoder_optimizer.state_dict(), "d_optimizer": self.decoder_optimizer}, "./model.pt")
