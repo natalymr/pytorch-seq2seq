@@ -25,14 +25,20 @@ class EncoderLSTM(nn.Module):
         self.n_layers = n_layers
 
         self.embedding = nn.Embedding(input_size, hidden_size)
-        self.lstm = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=drop_prob, batch_first=True)
+        self.lstm_del = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=drop_prob, batch_first=True)
+        self.lstm_add = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=drop_prob, batch_first=True)
 
-    def forward(self, inputs, hidden):
+    def forward(self, inputs, hidden, is_del: bool):
         # Embed input words
         embedded = self.embedding(inputs)
+        # print(f'encoder: inputs shape = {inputs.size()}')
         # Pass the embedded word vectors into LSTM and return all outputs
-        output, hidden = self.lstm(embedded, hidden)
-        return output, hidden
+        if is_del:
+            return self.lstm_del(embedded, hidden)
+        else:
+            return self.lstm_add(embedded, hidden)
+        # output, hidden = self.lstm(embedded, hidden)
+        # return output, hidden
 
     def init_hidden(self, batch_size=1):
         return (torch.zeros(self.n_layers, batch_size, self.hidden_size, device=device),
@@ -60,54 +66,62 @@ class BahdanauDecoder(nn.Module):
 
     def forward(self, inputs, hidden, encoder_outputs):
         encoder_outputs = encoder_outputs.squeeze()
-        print(f'D-forward = {inputs.size()},  h = {hidden[0].size()}, c={hidden[1].size()},'
-              f'encoder output = {encoder_outputs.size()}')
+        # print(f'D-forward = {inputs.size()},  h = {hidden[0].size()}, c={hidden[1].size()},'
+        #       f'encoder output = {encoder_outputs.size()}')
         # Embed input words
         embedded = self.embedding(inputs[:, None])
         embedded = self.dropout(embedded)
-        print(f'embedded = {embedded.size()}')
+        # print(f'embedded = {embedded.size()}')
 
         # Calculating Alignment Scores
         hidden_with_time_axis = hidden[0].permute(1, 0, 2)
-        print(f'hidden_with_time_axis = {hidden_with_time_axis.size()}')
+        # print(f'hidden_with_time_axis = {hidden_with_time_axis.size()}')
         x = torch.tanh(self.fc_hidden(hidden_with_time_axis) + self.fc_encoder(encoder_outputs))
-        print(f'x = {x.size()}')
+        # print(f'x = {x.size()}')
         # alignment_scores = self.V(x)
         # print(f'al scores = {alignment_scores.size()}')
 
         # Softmaxing alignment scores to get Attention weights
         attn_weights = F.softmax(self.V(x), dim=1)
-        print(f'at w = {attn_weights.size()}')
+        # print(f'at w = {attn_weights.size()}')
 
         # Multiplying the Attention weights with encoder outputs to get the context vector
         context_vector = torch.sum(attn_weights * encoder_outputs, dim=1)
-        print(f'context vector = {context_vector.size()}')
+        # print(f'context vector = {context_vector.size()}')
 
         # Concatenating context vector with embedded input word
         output = torch.cat((embedded, context_vector.unsqueeze(1)), -1)
-        print(f'concat = {output.size()}')
+        # print(f'concat = {output.size()}')
         # Passing the concatenated vector as input to the LSTM cell
         output, hidden = self.lstm(output, hidden)
-        print(f'output = {output.size()}')
+        # print(f'output = {output.size()}')
         # Passing the LSTM output through a Linear layer acting as a classifier
         output = F.log_softmax(self.classifier(output.view(-1, output.size(2))), dim=1)
         return output, hidden, attn_weights
 
 
 if __name__ == '__main__':
+    src_del_field_name = 'src_del'
+    src_add_field_name = 'src_add'
+    tgt_field_name = 'tgt'
     src = SourceField(init_token='<sos>', eos_token='<eos>')
     tgt = TargetField(init_token='<sos>', eos_token='<eos>')  # init_token='<sos>', eos_token='<eos>'
     train = torchtext.data.TabularDataset(
-        path='data/diffs/train/train.small.data', format='tsv',
-        fields=[('src', src), ('tgt', tgt)],
+        path='data/diffs/test/val.small.del_add_full.data', format='tsv',
+        fields=[(src_del_field_name, src),
+                (src_add_field_name, src),
+                (tgt_field_name, tgt)],
     )
     src.build_vocab(train, max_size=50000)
     tgt.build_vocab(train, max_size=50000, min_freq=1)
     input_vocab = src.vocab
     output_vocab = tgt.vocab
 
+    print(f'src vocab = {len(src.vocab)}, tgt vocab = {len(tgt.vocab)}')
+    print(output_vocab.stoi.keys())
+    print(input_vocab.stoi)
     # Reading the English-German sentences pairs from the file
-    with open("data/diffs/train/train.small.data", "r") as file:
+    with open("data/diffs/test/val.small.data", "r") as file:
         deu = [x for x in file.readlines()]
     en = []
     de = []
@@ -116,7 +130,7 @@ if __name__ == '__main__':
         de.append(line.split("\t")[1])
 
     # Setting the number of training sentences we'll use
-    training_examples = 20
+    training_examples = 10
     # We'll be using the spaCy's English and German tokenizers
     spacy_en = English()
     spacy_de = German()
@@ -147,6 +161,9 @@ if __name__ == '__main__':
     de_w2i = {o: i for i, o in enumerate(de_words)}
     de_i2w = {i: o for i, o in enumerate(de_words)}
 
+    print(f'en_words = {len(en_words)}, de_words = {len(de_words)}')
+    print(de_words)
+
     # Converting our English and German sentences to their token indexes
     for i in range(len(en_inputs)):
         en_sentence = en_inputs[i]
@@ -163,20 +180,19 @@ if __name__ == '__main__':
     decoder_optimizer = optim.Adam(decoder.parameters(), lr=lr)
 
     EPOCHS = 1
-    batch_size = 2
+    batch_size = 1
     teacher_forcing_prob = 1
     encoder.train()
     decoder.train()
     tk0 = tqdm(range(1, EPOCHS + 1), total=EPOCHS)
-    src_field_name = 'src'
-    tgt_field_name = 'tgt'
     batch_iterator = torchtext.data.BucketIterator(
         dataset=train,
         batch_size=batch_size,
         sort=False,
+        repeat=False,
         sort_within_batch=True,
-        sort_key=lambda x: len(x.src),
-        device=device, repeat=False)
+        sort_key=lambda x: len(x.src_del),
+        device=device)
 
     for epoch in tk0:
         batch_generator = batch_iterator.__iter__()
@@ -184,15 +200,19 @@ if __name__ == '__main__':
         # tk1 = tqdm(enumerate(en_inputs), total=len(en_inputs), leave=False)
         # for i, sentence in tk1:
         for batch in batch_generator:
+            # print(batch.data[0].src_del)
+            print(batch.data[0].tgt)
+
             loss = 0.
             h = encoder.init_hidden(batch_size=batch_size)
             encoder_optimizer.zero_grad()
             decoder_optimizer.zero_grad()
-            input_variables, input_lengths = getattr(batch, src_field_name)
+            input_variables, input_lengths = getattr(batch, src_del_field_name)
             target_variables = getattr(batch, tgt_field_name)
+            print(target_variables)
             # inp = torch.tensor(sentence).unsqueeze(0).to(device)
             # encoder_outputs, h = encoder(inp, h)
-            print(f'input var = {input_variables.size()}, h_0 = {h[0].size()}, h_1 = {h[1].size()}')
+            # print(f'\ninput var = {input_variables.size()}, h_0 = {h[0].size()}, h_1 = {h[1].size()}')
             encoder_outputs, h = encoder(input_variables, h)
             # print(f'enc output= {encoder_outputs.size()}')
             # print(len(en_words), len(de_words))
@@ -205,7 +225,7 @@ if __name__ == '__main__':
             teacher_forcing = True if random.random() < teacher_forcing_prob else False
             # print(f'target_variables = {target_variables.size()}')
             for ii in range(target_variables.size(1)):
-                print(f'decoder input = {decoder_input.size()}, encoder_outputs = {encoder_outputs.size()}')
+                # print(f'decoder input = {decoder_input.size()}, encoder_outputs = {encoder_outputs.size()}')
                 decoder_output, decoder_hidden, decoder_attention = decoder(decoder_input,
                                                                             decoder_hidden,
                                                                             encoder_outputs)
@@ -216,8 +236,8 @@ if __name__ == '__main__':
                 top_value = decoder_output.argmax(1)
                 # print(f'top index = {top_index}')
                 output.append(top_value)
-                print(f'top value = {top_value}')
-                print(f'LOSS: decoder output = {decoder_output.size()}, tar var = {target_variables[:, ii].size()}')
+                # print(f'top value = {top_value}')
+                # print(f'LOSS: decoder output = {decoder_output.size()}, tar var = {target_variables[:, ii].size()}')
                 # print(f'LOSS: decoder_output = {decoder_output.view(-1, len(de_words)).size()},'
                 #     f'target_vars = {target_variables[:, ii].view(-1).size()}')
                 # loss += F.nll_loss(decoder_output.view(-1, len(de_words)), target_variables[:, ii].view(-1))
