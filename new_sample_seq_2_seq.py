@@ -34,7 +34,7 @@ class EncoderLSTM(nn.Module):
     def forward(self, inputs, hidden, is_del: bool):
         # Embed input words
         embedded = self.embedding(inputs)
-        print(f'encoder: inputs shape = {inputs.size()}')
+        # print(f'encoder: inputs shape = {inputs.size()}')
         # Pass the embedded word vectors into LSTM and return all outputs
         if is_del:
             return self.lstm_del(embedded, hidden)
@@ -134,6 +134,141 @@ class BahdanauDecoder(nn.Module):
         return output, hidden, attn_weights, attn_weights_del, attn_weights_add
 
 
+class Seq2SeqTwoInput(nn.Module):
+    def __init__(self, encoder, decoder):
+        super(Seq2SeqTwoInput, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def train(self):
+        self.encoder.train()
+        self.decoder.train()
+
+    def eval(self):
+        self.encoder.eval()
+        self.decoder.eval()
+
+    def forward(self, src_del, src_add, tgt, batch_size):
+        h_del = encoder.init_hidden(batch_size=batch_size)
+        h_add = encoder.init_hidden(batch_size=batch_size)
+
+        encoder_outputs_del, h_del = encoder(src_del, h_del, is_del=True)
+        encoder_outputs_add, h_add = encoder(src_add, h_add, is_del=False)
+
+        # First decoder input will be the SOS token
+        decoder_input = torch.tensor([output_vocab.stoi['<sos>']] * batch_size, device=device)
+        # First decoder hidden state will be last encoder hidden state
+        decoder_hidden = (h_del[0].add(h_add[0]), h_del[1].add(h_add[1]))
+        tgt_len = tgt.size(1)
+        output_vocab_size = decoder.output_size
+        output = torch.zeros(tgt_len, batch_size, output_vocab_size)
+        teacher_forcing = True if random.random() < teacher_forcing_prob else False
+        teacher_forcing = True
+        if not teacher_forcing:
+            print(f'not TEACHER FORCHING')
+
+        for ii in range(tgt_len):
+            decoder_output, decoder_hidden, decoder_attention, _, _ = decoder(decoder_input,
+                                                                              decoder_hidden,
+                                                                              encoder_outputs_del,
+                                                                              encoder_outputs_add)
+            # Get the index value of the word with the highest score from the decoder output
+            top_value = decoder_output.argmax(1)
+            output[ii] = decoder_output
+            if ii == 0:
+                acc_tensor = top_value.reshape(batch_size, -1)
+            else:
+                acc_tensor = torch.cat((acc_tensor, top_value.reshape(batch_size, -1)), 1)
+
+            if teacher_forcing:
+                decoder_input = tgt[:, ii]  # Teacher forcing
+            else:
+                decoder_input = top_value
+
+        return output, acc_tensor
+
+
+def train(model, iterator, optimizer, loss_f):
+    model.train()
+
+    epoch_loss = 0.
+    tgt_seqs, pred_seqs = [], []
+    batch_generator = iterator.__iter__()
+
+    for batch in batch_generator:
+        optimizer.zero_grad()
+        input_variables_del, _ = getattr(batch, src_del_field_name)
+        input_variables_add, _ = getattr(batch, src_add_field_name)
+        target_variables = getattr(batch, tgt_field_name)
+
+        output, pred_acc_tensor = model(input_variables_del, input_variables_add, target_variables, batch_size)
+
+        # Calculate the loss of the prediction against the actual word
+        output_dim = output.shape[-1]
+        loss = loss_f(output.view(-1, output_dim), target_variables.view(-1))
+        # loss = loss_f(output.squeeze(1), target_variables.squeeze(0))
+
+        tgt_seqs.extend(
+            ' '.join(batch.data[i].tgt)
+            for i in range(len(batch))
+        )
+        pred_seqs.extend(
+            ' '.join(output_vocab.itos[tok] for tok in pred_acc_tensor[i]
+                     if output_vocab.itos[tok] not in specials)
+            for i in range(len(batch))
+        )
+
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item() / len(batch)
+
+    # compute bleu
+    epoch_bleu = run_perl_script_and_parse_result('\n'.join(tgt_seqs),
+                                                  '\n'.join(pred_seqs),
+                                                  perl_script_path)
+    print("TARGET = {}\nPREDICTED = {}".format(', '.join(tgt_seqs), ', '.join(pred_seqs)))
+    return epoch_loss, epoch_bleu
+
+
+def evaluate(model, iterator, loss_f):
+    model.eval()
+
+    epoch_loss = 0.
+    tgt_seqs, pred_seqs = [], []
+    batch_generator = iterator.__iter__()
+
+    with torch.no_grad():
+        for batch in batch_generator:
+            input_variables_del, _ = getattr(batch, src_del_field_name)
+            input_variables_add, _ = getattr(batch, src_add_field_name)
+            target_variables = getattr(batch, tgt_field_name)
+
+            output, pred_acc_tensor = model(input_variables_del, input_variables_add, target_variables, batch_size)
+
+            # Calculate the loss of the prediction against the actual word
+            output_dim = output.shape[-1]
+            loss = loss_f(output.view(-1, output_dim), target_variables.view(-1))
+
+            tgt_seqs.extend(
+                ' '.join(batch.data[i].tgt)
+                for i in range(len(batch))
+            )
+            pred_seqs.extend(
+                ' '.join(output_vocab.itos[tok] for tok in pred_acc_tensor[i]
+                         if output_vocab.itos[tok] not in specials)
+                for i in range(len(batch))
+            )
+
+            epoch_loss += loss.item() / len(batch)
+
+        # compute bleu
+        epoch_bleu = run_perl_script_and_parse_result('\n'.join(tgt_seqs),
+                                                      '\n'.join(pred_seqs),
+                                                      perl_script_path)
+        print("TARGET = {}\nPREDICTED = {}".format(', '.join(tgt_seqs), ', '.join(pred_seqs)))
+    return epoch_loss, epoch_bleu
+
+
 if __name__ == '__main__':
     perl_script_path = Path('../../../results_analyzing/bleu/multi-bleu.perl')
     specials = ['<sos>', '<eos>', '<unk>', '<pad>']
@@ -142,22 +277,33 @@ if __name__ == '__main__':
     tgt_field_name = 'tgt'
     src = SourceField(init_token='<sos>', eos_token='<eos>')
     tgt = TargetField(init_token='<sos>', eos_token='<eos>')  # init_token='<sos>', eos_token='<eos>'
-    train = torchtext.data.TabularDataset(
+    train_data = torchtext.data.TabularDataset(
         # path='data/diffs/test/val.small.del_add.data', format='tsv',
         path='../../../../new_data/processed_data/splitted_two_input_100/train_100_10.data', format='tsv',
+        # path='../../../../new_data/processed_data/splitted_two_input_100/train_100.data', format='tsv',
         fields=[(src_del_field_name, src),
                 (src_add_field_name, src),
                 (tgt_field_name, tgt)],
     )
-    src.build_vocab(train, max_size=50000)
-    tgt.build_vocab(train, max_size=50000)
+
+    src.build_vocab(train_data, max_size=50000)
+    tgt.build_vocab(train_data, max_size=50000, min_freq=1)
     input_vocab = src.vocab
     output_vocab = tgt.vocab
 
+    test_data = torchtext.data.TabularDataset(
+        # path='data/diffs/test/val.small.del_add.data', format='tsv',
+        path='../../../../new_data/processed_data/splitted_two_input_100/train_100_10.data', format='tsv',
+        # path='../../../../new_data/processed_data/splitted_two_input_100/train_100.data', format='tsv',
+        fields=[(src_del_field_name, src),
+                (src_add_field_name, src),
+                (tgt_field_name, tgt)],
+    )
+
     # print(f'src vocab = {len(src.vocab)}, tgt vocab = {len(tgt.vocab)}')
-    print('whitespace' in output_vocab.stoi.keys())
-    print(f'SIZE INPUT_VOCAB = {len(input_vocab.stoi)}, INPUT_VOCAB = {input_vocab.stoi}')
-    print(f'SIZE OUTPUT_VOCAB = {len(output_vocab.stoi)}, OUTPUT_VOCAB = {output_vocab.stoi}')
+    # print(output_vocab.stoi.keys())
+    # print(input_vocab.stoi)
+    # print(output_vocab.stoi)
 
     wandb.init(project="nmt-2.0-test")
     wandb.watch_called = False
@@ -165,131 +311,68 @@ if __name__ == '__main__':
     hidden_size = 2
     encoder = EncoderLSTM(len(src.vocab), hidden_size).to(device)
     decoder = BahdanauDecoder(hidden_size, len(tgt.vocab)).to(device)
-
-    def get_model_size(model):
-        def get_values_from_size(size_):
-            result = tuple()
-            for s in size_:
-                result += (s,)
-            return str(result)
-        print(f'\n {model._get_name()}')
-        print('| ======== Layer ======== | ======== Shape ======== | ======== #Params ======== |')
-        total_num_params = 0
-        for k in model.state_dict().keys():
-            v = model.state_dict().__getitem__(k).size()
-            total_num_params += v.numel()
-            print("{:>25} {:>25} {:>27}".format(k, get_values_from_size(v), v.numel()))
-        print('| ======================= | ======================= | ========================= |')
-        print(f' Total number of params = {total_num_params}\n')
-
-    # get_model_size(encoder)
-    # get_model_size(decoder)
+    model = Seq2SeqTwoInput(encoder, decoder)
 
     lr = 0.01
-    encoder_optimizer = optim.Adam(encoder.parameters(), lr=lr)
-    decoder_optimizer = optim.Adam(decoder.parameters(), lr=lr)
+    # encoder_optimizer = optim.Adam(encoder.parameters(), lr=lr)
+    # decoder_optimizer = optim.Adam(decoder.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    EPOCHS = 1
-    batch_size = 2
+    EPOCHS = 1000
+    batch_size = 5
+    test_every_epoch = 1
     teacher_forcing_prob = 1
-    encoder.train()
-    decoder.train()
+
     wandb.watch(decoder, log="all")
 
     tk0 = tqdm(range(1, EPOCHS + 1), total=EPOCHS)
     batch_iterator = torchtext.data.BucketIterator(
-        dataset=train,
+        dataset=train_data,
         batch_size=batch_size,
         sort=False,
         repeat=False,
         sort_within_batch=True,
         sort_key=lambda x: len(x.src_del),
         device=device)
-    print(f'BAAAATCH {len(batch_iterator)}')
+
+    test_batch_iterator = torchtext.data.BucketIterator(
+        dataset=test_data,
+        batch_size=batch_size,
+        sort=False,
+        repeat=False,
+        sort_within_batch=True,
+        sort_key=lambda x: len(x.src_del),
+        device=device)
+
     for epoch in tk0:
-        batch_generator = batch_iterator.__iter__()
-        avg_loss = 0.
-        loss_another_epoch = 0.
-        tgt_seqs, pred_seqs = [], []
-        # tk1 = tqdm(enumerate(en_inputs), total=len(en_inputs), leave=False)
-        # for i, sentence in tk1:
-        for batch in batch_generator:
-            # print(batch.data[0].src_del)
-            # print(batch.data[0].tgt)
-            loss = 0.
-            h_del = encoder.init_hidden(batch_size=batch_size)
-            h_add = encoder.init_hidden(batch_size=batch_size)
-            encoder_optimizer.zero_grad()
-            decoder_optimizer.zero_grad()
-            input_variables_del, input_lengths_del = getattr(batch, src_del_field_name)
-            input_variables_add, input_lengths_add = getattr(batch, src_add_field_name)
-            target_variables = getattr(batch, tgt_field_name)
+        epoch_loss, epoch_bleu = train(model, batch_iterator, optimizer, F.nll_loss)
 
-            encoder_outputs_del, h_del = encoder(input_variables_del, h_del, is_del=True)
-            encoder_outputs_add, h_add = encoder(input_variables_add, h_add, is_del=False)
+        if epoch % test_every_epoch == 0:
+            test_loss, test_bleu = evaluate(model, test_batch_iterator, F.nll_loss)
 
-            # First decoder input will be the SOS token
-            decoder_input = torch.tensor([output_vocab.stoi['<sos>']] * batch_size, device=device)
-            # First decoder hidden state will be last encoder hidden state
-            decoder_hidden = (h_del[0].add(h_add[0]), h_del[1].add(h_add[1]))
-            output = []
-            # output_another = torch.zeros(target_variables.size(1), batch_size, len(output_vocab.stoi))
-            teacher_forcing = True if random.random() < teacher_forcing_prob else False
-            # teacher_forcing = True
-            if not teacher_forcing:
-                print(f'not TEACHER FORCHING')
-
-            tgt_seqs.extend(
-                ' '.join(batch.data[i].tgt)
-                for i in range(len(batch))
-            )
-
-
-            for ii in range(target_variables.size(1)):
-                # print(f'decoder input = {decoder_input.size()}, encoder_outputs = {encoder_outputs.size()}')
-                decoder_output, decoder_hidden, decoder_attention, _, _ = decoder(decoder_input,
-                                                                                  decoder_hidden,
-                                                                                  encoder_outputs_del,
-                                                                                  encoder_outputs_add)
-                # Get the index value of the word with the highest score from the decoder output
-                top_value = decoder_output.argmax(1)
-                # output_another[ii] = decoder_output
-                if ii == 0:
-                    acc_tensor = top_value.reshape(batch_size, -1)
-                else:
-                    acc_tensor = torch.cat((acc_tensor, top_value.reshape(batch_size, -1)), 1)
-                if teacher_forcing:
-                    decoder_input = target_variables[:, ii]  # Teacher forcing
-                else:
-                    decoder_input = top_value
-                    # if decoder_input.item() == output_vocab.stoi['<eos>']:
-                    #     break
-                # Calculate the loss of the prediction against the actual word
-                loss += F.nll_loss(decoder_output, target_variables[:, ii])
-
-            pred_seqs.extend(
-                ' '.join(output_vocab.itos[tok] for tok in acc_tensor[i]
-                         if output_vocab.itos[tok] not in specials)
-                for i in range(len(batch))
-            )
-
-            loss.backward()
-            encoder_optimizer.step()
-            decoder_optimizer.step()
-            avg_loss += loss.item() / len(batch)
-            # loss_another_epoch = F.nll_loss(output_another.squeeze(1), target_variables.squeeze(0)).item() / len(batch)
-        # compute bleu
-        epoch_bleu = run_perl_script_and_parse_result('\n'.join(tgt_seqs),
-                                                      '\n'.join(pred_seqs),
-                                                      perl_script_path)
-        print("TARGET = {}\nPREDICTED = {}".format(', '.join(tgt_seqs), ', '.join(pred_seqs)))
         if epoch_bleu:
-            wandb.log({'bleu': epoch_bleu.bleu, 'avg_loss': avg_loss, 'another_loss': loss_another_epoch})
-            tk0.set_postfix(loss=avg_loss, train_bleu=epoch_bleu.bleu, another_loss=loss_another_epoch)
+            if epoch % test_every_epoch == 0:
+                if test_bleu:
+                    wandb.log({'train_bleu': epoch_bleu.bleu,
+                               'train_loss': epoch_loss,
+                               'test_loss': test_loss,
+                               'test_bleu': test_bleu.bleu})
+                    tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu.bleu,
+                                    test_loss=test_loss, test_bleu=test_bleu.bleu)
+                else:
+                    wandb.log({'train_bleu': epoch_bleu.bleu,
+                               'train_loss': epoch_loss,
+                               'test_loss': test_loss})
+                    tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu.bleu, test_loss=test_loss)
+            else:
+                wandb.log({'train_bleu': epoch_bleu.bleu, 'train_loss': epoch_loss})
+                tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu.bleu)
+
         else:
-            wandb.log({'avg_loss': avg_loss})
-            tk0.set_postfix(loss=avg_loss)
-    wandb.save('model_nmt2.h5')
+            wandb.log({'train_loss': epoch_loss})
+            tk0.set_postfix(loss=epoch_loss)
+
+    # wandb.save('model_nmt2.h5')
 
     #   # Save model after every epoch (Optional)
     # torch.save({"encoder":encoder.state_dict(),

@@ -45,13 +45,15 @@ class TargetField(torchtext.data.Field):
             # kwargs['preprocessing'] = lambda seq: [self.SYM_SOS] + seq + [self.SYM_EOS]
             # in my dataset at eah line were <sos> and <eos>, so at this moment we delete it
             # this is a bad fix
-            kwargs['preprocessing'] = lambda seq: seq[1:-1]
+            # kwargs['preprocessing'] = lambda seq: seq[1:-1]
+            kwargs['preprocessing'] = lambda seq: seq
         else:
             func = kwargs['preprocessing']
             # kwargs['preprocessing'] = lambda seq: [self.SYM_SOS] + func(seq) + [self.SYM_EOS]
             # in my dataset at eah line were <sos> and <eos>, so at this moment we delete it
             # this is a bad fix
-            kwargs['preprocessing'] = lambda seq: func(seq[1:-1])
+            # kwargs['preprocessing'] = lambda seq: func(seq[1:-1])
+            kwargs['preprocessing'] = lambda seq: func(seq)
 
         self.sos_id = None
         self.eos_id = None
