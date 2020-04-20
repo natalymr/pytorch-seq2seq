@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Any
 
 import wandb
 
@@ -16,8 +15,16 @@ from seq2seq.dataset import SourceField, TargetField
 # if torch.cuda.is_available:
 #     device = torch.device("cuda")
 # else:
-from results_analyzing.utils import run_perl_script_and_parse_result
+from results_analyzing.utils import run_perl_script_and_parse_result, get_nltk_bleu_score_for_corpora
+# monkey-patching like a boss: Start
+from torchtext.data import Batch
+batch_old_init = Batch.__init__
+def batch_new_init(self, data=None, dataset=None, device=None):
+    self.data = data
+    batch_old_init(self, data, dataset, device)
 
+Batch.__init__ = batch_new_init
+# monkey-patching like a boss: End
 device = torch.device("cpu")
 
 
@@ -223,11 +230,13 @@ def train(model, iterator, optimizer, loss_f):
         epoch_loss += loss.item() / len(batch)
 
     # compute bleu
+
     epoch_bleu = run_perl_script_and_parse_result('\n'.join(tgt_seqs),
                                                   '\n'.join(pred_seqs),
                                                   perl_script_path)
+    nltk_bleu = get_nltk_bleu_score_for_corpora(tgt_seqs, pred_seqs)
     print("TARGET = {}\nPREDICTED = {}".format(', '.join(tgt_seqs), ', '.join(pred_seqs)))
-    return epoch_loss, epoch_bleu
+    return epoch_loss, nltk_bleu
 
 
 def evaluate(model, iterator, loss_f):
@@ -265,8 +274,9 @@ def evaluate(model, iterator, loss_f):
         epoch_bleu = run_perl_script_and_parse_result('\n'.join(tgt_seqs),
                                                       '\n'.join(pred_seqs),
                                                       perl_script_path)
+        nltk_bleu = get_nltk_bleu_score_for_corpora(tgt_seqs, pred_seqs)
         print("TARGET = {}\nPREDICTED = {}".format(', '.join(tgt_seqs), ', '.join(pred_seqs)))
-    return epoch_loss, epoch_bleu
+    return epoch_loss, nltk_bleu
 
 
 if __name__ == '__main__':
@@ -293,7 +303,7 @@ if __name__ == '__main__':
 
     test_data = torchtext.data.TabularDataset(
         # path='data/diffs/test/val.small.del_add.data', format='tsv',
-        path='../../../../new_data/processed_data/splitted_two_input_100/train_100_10.data', format='tsv',
+        path='../../../../new_data/processed_data/splitted_two_input_100/test_100_for_test_tail.data', format='tsv',
         # path='../../../../new_data/processed_data/splitted_two_input_100/train_100.data', format='tsv',
         fields=[(src_del_field_name, src),
                 (src_add_field_name, src),
@@ -353,20 +363,20 @@ if __name__ == '__main__':
         if epoch_bleu:
             if epoch % test_every_epoch == 0:
                 if test_bleu:
-                    wandb.log({'train_bleu': epoch_bleu.bleu,
+                    wandb.log({'train_bleu': epoch_bleu,
                                'train_loss': epoch_loss,
                                'test_loss': test_loss,
-                               'test_bleu': test_bleu.bleu})
-                    tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu.bleu,
-                                    test_loss=test_loss, test_bleu=test_bleu.bleu)
+                               'test_bleu': test_bleu})
+                    tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu,
+                                    test_loss=test_loss, test_bleu=test_bleu)
                 else:
-                    wandb.log({'train_bleu': epoch_bleu.bleu,
+                    wandb.log({'train_bleu': epoch_bleu,
                                'train_loss': epoch_loss,
                                'test_loss': test_loss})
-                    tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu.bleu, test_loss=test_loss)
+                    tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu, test_loss=test_loss)
             else:
-                wandb.log({'train_bleu': epoch_bleu.bleu, 'train_loss': epoch_loss})
-                tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu.bleu)
+                wandb.log({'train_bleu': epoch_bleu, 'train_loss': epoch_loss})
+                tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu)
 
         else:
             wandb.log({'train_loss': epoch_loss})
