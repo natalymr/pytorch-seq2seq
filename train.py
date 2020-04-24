@@ -34,18 +34,19 @@ else:
 
 
 class EncoderLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, n_layers=1, drop_prob=0):
+    def __init__(self, input_size, hidden_size, n_layers=1, lstm_drop_prob=0., embed_drop_prob=0.):
         super(EncoderLSTM, self).__init__()
         self.hidden_size = hidden_size
         self.n_layers = n_layers
 
+        self.dropout = nn.Dropout(embed_drop_prob)
         self.embedding = nn.Embedding(input_size, hidden_size)
-        self.lstm_del = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=drop_prob, batch_first=True)
-        self.lstm_add = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=drop_prob, batch_first=True)
+        self.lstm_del = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=lstm_drop_prob, batch_first=True)
+        self.lstm_add = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=lstm_drop_prob, batch_first=True)
 
     def forward(self, inputs, hidden, is_del: bool):
         # Embed input words
-        embedded = self.embedding(inputs)
+        embedded = self.dropout(self.embedding(inputs))
         # print(f'encoder: inputs shape = {inputs.size()}')
         # Pass the embedded word vectors into LSTM and return all outputs
         if is_del:
@@ -61,26 +62,25 @@ class EncoderLSTM(nn.Module):
 
 
 class BahdanauDecoder(nn.Module):
-    def __init__(self, hidden_size, output_size, n_layers=1, drop_prob=0.1):
+    def __init__(self, hidden_size, output_size, n_layers=1, embed_drop_prob=0.1, lstm_drop_prob=0.1):
         super(BahdanauDecoder, self).__init__()
+
         self.hidden_size = hidden_size
         self.output_size = output_size
         self.n_layers = n_layers
-        self.drop_prob = drop_prob
 
         self.embedding = nn.Embedding(self.output_size, self.hidden_size)
 
-        self.fc_hidden = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.fc_encoder_del = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.fc_encoder_add = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.fc_encoder_common = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.weight = nn.Parameter(torch.FloatTensor(1, hidden_size))
+        self.fc_hidden = nn.Linear(self.hidden_size, self.hidden_size)
+        self.fc_encoder_del = nn.Linear(self.hidden_size, self.hidden_size)
+        self.fc_encoder_add = nn.Linear(self.hidden_size, self.hidden_size)
+        self.fc_encoder_common = nn.Linear(self.hidden_size, self.hidden_size)
         self.V_del = nn.Linear(self.hidden_size, 1)
         self.V_add = nn.Linear(self.hidden_size, 1)
         self.V_common = nn.Linear(self.hidden_size, 1)
         self.attn_combine = nn.Linear(self.hidden_size * 2, self.hidden_size)
-        self.dropout = nn.Dropout(self.drop_prob)
-        self.lstm = nn.LSTM(self.hidden_size * 2, self.hidden_size, batch_first=True)
+        self.dropout = nn.Dropout(embed_drop_prob)
+        self.lstm = nn.LSTM(self.hidden_size * 2, self.hidden_size, batch_first=True, dropout=lstm_drop_prob)
         self.classifier = nn.Linear(self.hidden_size, self.output_size)
 
     def forward(self, inputs, hidden, encoder_outputs_del, encoder_outputs_add):
@@ -208,7 +208,6 @@ def train(model, iterator, optimizer, loss_f):
     batch_generator = iterator.__iter__()
 
     for i, batch in enumerate(batch_generator):
-        print(f'# batch {i + 1}')
         optimizer.zero_grad()
         input_variables_del, _ = getattr(batch, src_del_field_name)
         input_variables_add, _ = getattr(batch, src_add_field_name)
@@ -244,7 +243,10 @@ def train(model, iterator, optimizer, loss_f):
                                                   perl_script_path)
 
     nltk_bleu = get_nltk_bleu_score_for_corpora(tgt_seqs, pred_seqs)
-    print("TARGET = {}\nPREDICTED = {}".format(', '.join(tgt_seqs), ', '.join(pred_seqs)))
+    print(f'bleu train = {nltk_bleu}') 
+    for p, t in zip(pred_seqs, tgt_seqs):
+        print(f'{p} - {t}')
+    #print("TARGET = {}\nPREDICTED = {}".format(', '.join(tgt_seqs), ', '.join(pred_seqs)))
     return epoch_loss, nltk_bleu
 
 
@@ -288,7 +290,7 @@ def evaluate(model, iterator, loss_f):
                                                       '\n'.join(pred_seqs),
                                                       perl_script_path)
         nltk_bleu = get_nltk_bleu_score_for_corpora(tgt_seqs, pred_seqs)
-        print("TARGET = {}\nPREDICTED = {}".format(', '.join(tgt_seqs), ', '.join(pred_seqs)))
+ #       print("TARGET = {}\nPREDICTED = {}".format(', '.join(tgt_seqs), ', '.join(pred_seqs)))
     return epoch_loss, nltk_bleu
 
 
@@ -303,7 +305,7 @@ if __name__ == '__main__':
     train_data = torchtext.data.TabularDataset(
         # path='data/diffs/test/val.small.del_add.data', format='tsv',
         # path='data/splitted_two_input_100/train_100_10.data', format='tsv',
-        path='data/splitted_two_input_100/train_100.data', format='tsv',
+        path='data/splitted_two_input_100/train_100_100.data', format='tsv',
         # path='../../../../new_data/processed_data/splitted_two_input_100/train_100.data', format='tsv',
         fields=[(src_del_field_name, src),
                 (src_add_field_name, src),
@@ -317,8 +319,8 @@ if __name__ == '__main__':
 
     test_data = torchtext.data.TabularDataset(
         # path='data/diffs/test/val.small.del_add.data', format='tsv',
-        # path='data/splitted_two_input_100/train_100_10.data', format='tsv',
-        path='data/splitted_two_input_100/test_100.data', format='tsv',
+        path='data/splitted_two_input_100/test_100_100.data', format='tsv',
+        # path='data/splitted_two_input_100/test_100.data', format='tsv',
         # path='../../../../new_data/processed_data/splitted_two_input_100/train_100.data', format='tsv',
         fields=[(src_del_field_name, src),
                 (src_add_field_name, src),
@@ -333,21 +335,34 @@ if __name__ == '__main__':
     wandb.init(entity='natalymr', project="nmt-2.0-test")
     wandb.watch_called = False
 
-    hidden_size = 256
-    encoder = EncoderLSTM(len(src.vocab), hidden_size).to(device)
-    decoder = BahdanauDecoder(hidden_size, len(tgt.vocab)).to(device)
+    hidden_size = 400
+    #  encoder = EncoderLSTM(len(src.vocab), hidden_size).to(device)
+    encoder = EncoderLSTM(len(src.vocab), hidden_size, embed_drop_prob=0.5, lstm_drop_prob=0.5).to(device)
+    # decoder = BahdanauDecoder(hidden_size, len(tgt.vocab)).to(device)
+    decoder = BahdanauDecoder(hidden_size, len(tgt.vocab), embed_drop_prob=0.5, lstm_drop_prob=0.2).to(device)
     model = Seq2SeqTwoInput(encoder, decoder).cuda()
+
+    def init_weights(m):
+        for name, param in m.named_parameters():
+            if 'weight' in name:
+                # nn.init.normal_(param.data, mean=0, std=0.01)
+                # nn.init.xavier_normal_(param.data)
+                nn.init.xavier_uniform_(param.data)
+            else:
+                nn.init.constant_(param.data, 0)
+
+    model.apply(init_weights)
 
     print(next(model.parameters()).is_cuda)
     print(device)
 
 
-    lr = 0.01
     # encoder_optimizer = optim.Adam(encoder.parameters(), lr=lr)
     # decoder_optimizer = optim.Adam(decoder.parameters(), lr=lr)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999))
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=1)
 
-    EPOCHS = 10
+    EPOCHS = 2000
     batch_size = 100
     test_every_epoch = 1
     teacher_forcing_prob = 1
@@ -379,7 +394,7 @@ if __name__ == '__main__':
         
         if epoch % test_every_epoch == 0:
             test_loss, test_bleu = evaluate(model, test_batch_iterator, F.nll_loss)
-
+            print(f'test bleu = {test_bleu}')
             wandb.log({'train_bleu': epoch_bleu,
                        'train_loss': epoch_loss,
                        'test_loss': test_loss,
@@ -388,8 +403,14 @@ if __name__ == '__main__':
                             test_loss=test_loss, test_bleu=test_bleu)
         else:
             wandb.log({'train_bleu': epoch_bleu, 'train_loss': epoch_loss})
-            tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu) 
-    # wandb.save('model_nmt2.h5')
+            tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu)
+        if epoch % 10 == 0:
+            torch.save({"encoder": encoder.state_dict(),
+                 "decoder": decoder.state_dict(),
+                 "optimizer": optimizer.state_dict()},
+                "./model_nmt.pt") 
+        scheduler.step()
+    wandb.save('model_nmt2.h5')
 
     #   # Save model after every epoch (Optional)
     # torch.save({"encoder":encoder.state_dict(),
