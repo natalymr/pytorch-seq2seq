@@ -33,6 +33,24 @@ else:
     device = torch.device("cpu")
 
 
+def get_model_size(model):
+    def get_values_from_size(size_):
+        result = tuple()
+        for s in size_:
+            result += (s,)
+        return str(result)
+
+    print(f'\n {model._get_name()}')
+    print('| ======== Layer ======== | ======== Shape ======== | ======== #Params ======== |')
+    total_num_params = 0
+    for k in model.state_dict().keys():
+        v = model.state_dict().__getitem__(k).size()
+        total_num_params += v.numel()
+        print("{:>25} {:>25} {:>27}".format(k, get_values_from_size(v), v.numel()))
+    print('| ======================= | ======================= | ========================= |')
+    print(f' Total number of params = {total_num_params}\n')
+
+
 class EncoderLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, n_layers=1, lstm_drop_prob=0., embed_drop_prob=0.):
         super(EncoderLSTM, self).__init__()
@@ -78,7 +96,6 @@ class BahdanauDecoder(nn.Module):
         self.V_del = nn.Linear(self.hidden_size, 1)
         self.V_add = nn.Linear(self.hidden_size, 1)
         self.V_common = nn.Linear(self.hidden_size, 1)
-        self.attn_combine = nn.Linear(self.hidden_size * 2, self.hidden_size)
         self.dropout = nn.Dropout(embed_drop_prob)
         self.lstm = nn.LSTM(self.hidden_size * 2, self.hidden_size, batch_first=True, dropout=lstm_drop_prob)
         self.classifier = nn.Linear(self.hidden_size, self.output_size)
@@ -200,15 +217,16 @@ class Seq2SeqTwoInput(nn.Module):
         return output, acc_tensor
 
 
-def train(model, iterator, optimizer, loss_f):
+def train(model, iterator, optimizer, loss_f, break_after, ignore_index_loss):
     model.train()
-
+    print(f'we need to stop after {break_after}')
     epoch_loss = 0.
+    acc_loss = 0.
     tgt_seqs, pred_seqs = [], []
     batch_generator = iterator.__iter__()
+    optimizer.zero_grad()
 
     for i, batch in enumerate(batch_generator):
-        optimizer.zero_grad()
         input_variables_del, _ = getattr(batch, src_del_field_name)
         input_variables_add, _ = getattr(batch, src_add_field_name)
         target_variables = getattr(batch, tgt_field_name)
@@ -220,37 +238,58 @@ def train(model, iterator, optimizer, loss_f):
         output, pred_acc_tensor = model(input_variables_del, input_variables_add, target_variables, batch_size)
         # Calculate the loss of the prediction against the actual word
         output_dim = output.shape[-1]
-        loss = loss_f(output.view(-1, output_dim), target_variables.view(-1))
+        loss = loss_f(output.view(-1, output_dim), target_variables.view(-1), ignore_index=ignore_index_loss)
         # loss = loss_f(output.squeeze(1), target_variables.squeeze(0))
 
         tgt_seqs.extend(
-            ' '.join(batch.data[i].tgt)
-            for i in range(len(batch))
+            ' '.join(batch.data[j].tgt)
+            for j in range(len(batch))
         )
         pred_seqs.extend(
-            ' '.join(output_vocab.itos[tok] for tok in pred_acc_tensor[i]
-                     if output_vocab.itos[tok] not in specials)
-            for i in range(len(batch))
+            ' '.join(output_vocab.itos[tok] for tok in pred_acc_tensor[j]
+                    # if output_vocab.itos[tok] not in specials)
+            )
+               for j in range(len(batch))
         )
 
-        loss.backward()
-        optimizer.step()
+        if i % 10 == 0:
+            loss = 0.9 * acc_loss + 0.1 * loss
+            loss.backward()
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
+            # for p in model.parameters():
+            #     p.data.add_(-lr, p.grad.data)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+            optimizer.step()
+            optimizer.zero_grad()
+            acc_loss = 0.
+        else:
+            acc_loss += loss
         epoch_loss += loss.item() / len(batch)
+        if i  == break_after:
+            print(f'Stop after {i}')
+            iterator.init_epoch()
+            break 
 
     # compute bleu
-    epoch_bleu = run_perl_script_and_parse_result('\n'.join(tgt_seqs),
-                                                  '\n'.join(pred_seqs),
-                                                  perl_script_path)
+    #epoch_bleu = run_perl_script_and_parse_result('\n'.join(tgt_seqs),
+    #                                              '\n'.join(pred_seqs),
+    #                                              perl_script_path)
 
     nltk_bleu = get_nltk_bleu_score_for_corpora(tgt_seqs, pred_seqs)
     print(f'bleu train = {nltk_bleu}') 
-    for p, t in zip(pred_seqs, tgt_seqs):
+    for p, t in zip(pred_seqs[:20], tgt_seqs[:20]):
         print(f'{p} - {t}')
     #print("TARGET = {}\nPREDICTED = {}".format(', '.join(tgt_seqs), ', '.join(pred_seqs)))
     return epoch_loss, nltk_bleu
 
 
-def evaluate(model, iterator, loss_f):
+def write_to_file(output, seqs):
+    with open(output, 'w') as f:
+        for seq in seqs:
+            f.write(f'{seq}\n')
+
+
+def evaluate(model, iterator, loss_f, ignore_index_loss, is_test=False):
     model.eval()
 
     epoch_loss = 0.
@@ -271,7 +310,7 @@ def evaluate(model, iterator, loss_f):
 
             # Calculate the loss of the prediction against the actual word
             output_dim = output.shape[-1]
-            loss = loss_f(output.view(-1, output_dim), target_variables.view(-1))
+            loss = loss_f(output.view(-1, output_dim), target_variables.view(-1), ignore_index=ignore_index_loss)
 
             tgt_seqs.extend(
                 ' '.join(batch.data[i].tgt)
@@ -286,10 +325,13 @@ def evaluate(model, iterator, loss_f):
             epoch_loss += loss.item() / len(batch)
 
         # compute bleu
-        epoch_bleu = run_perl_script_and_parse_result('\n'.join(tgt_seqs),
-                                                      '\n'.join(pred_seqs),
-                                                      perl_script_path)
+#        epoch_bleu = run_perl_script_and_parse_result('\n'.join(tgt_seqs),
+#                                                      '\n'.join(pred_seqs),
+#                                                      perl_script_path)
         nltk_bleu = get_nltk_bleu_score_for_corpora(tgt_seqs, pred_seqs)
+        if is_test:
+            write_to_file(Path(f'results_nmt2_tokens_100_2/pred_{nltk_bleu}.txt'), pred_seqs)
+            write_to_file(Path(f'results_nmt2_tokens_100_2/ref.txt'), tgt_seqs)
  #       print("TARGET = {}\nPREDICTED = {}".format(', '.join(tgt_seqs), ', '.join(pred_seqs)))
     return epoch_loss, nltk_bleu
 
@@ -305,7 +347,8 @@ if __name__ == '__main__':
     train_data = torchtext.data.TabularDataset(
         # path='data/diffs/test/val.small.del_add.data', format='tsv',
         # path='data/splitted_two_input_100/train_100_10.data', format='tsv',
-        path='data/splitted_two_input_100/train_100_100.data', format='tsv',
+         path='data/splitted_two_input_100/train_100_47500.data', format='tsv',
+        # path='data/splitted_two_input_200/train_200_83000.data', format='tsv',
         # path='../../../../new_data/processed_data/splitted_two_input_100/train_100.data', format='tsv',
         fields=[(src_del_field_name, src),
                 (src_add_field_name, src),
@@ -316,12 +359,21 @@ if __name__ == '__main__':
     tgt.build_vocab(train_data, max_size=50000, min_freq=1)
     input_vocab = src.vocab
     output_vocab = tgt.vocab
+    pad_index = output_vocab.stoi['<pad>']
 
     test_data = torchtext.data.TabularDataset(
         # path='data/diffs/test/val.small.del_add.data', format='tsv',
-        path='data/splitted_two_input_100/test_100_100.data', format='tsv',
+        path='data/splitted_two_input_100/test_100_19000.data', format='tsv',
+        # path='data/splitted_two_input_200/test_200_17000.data', format='tsv',
         # path='data/splitted_two_input_100/test_100.data', format='tsv',
         # path='../../../../new_data/processed_data/splitted_two_input_100/train_100.data', format='tsv',
+        fields=[(src_del_field_name, src),
+                (src_add_field_name, src),
+                (tgt_field_name, tgt)],
+    )
+    val_data = torchtext.data.TabularDataset(
+        path='data/splitted_two_input_100/test_100_19000.data', format='tsv',
+        # path='data/splitted_two_input_200/val_200_16500.data', format='tsv',
         fields=[(src_del_field_name, src),
                 (src_add_field_name, src),
                 (tgt_field_name, tgt)],
@@ -335,35 +387,30 @@ if __name__ == '__main__':
     wandb.init(entity='natalymr', project="nmt-2.0-test")
     wandb.watch_called = False
 
-    hidden_size = 400
-    #  encoder = EncoderLSTM(len(src.vocab), hidden_size).to(device)
-    encoder = EncoderLSTM(len(src.vocab), hidden_size, embed_drop_prob=0.5, lstm_drop_prob=0.5).to(device)
-    # decoder = BahdanauDecoder(hidden_size, len(tgt.vocab)).to(device)
-    decoder = BahdanauDecoder(hidden_size, len(tgt.vocab), embed_drop_prob=0.5, lstm_drop_prob=0.2).to(device)
+    hidden_size = 300
+    encoder = EncoderLSTM(len(src.vocab), hidden_size, embed_drop_prob=0.2, lstm_drop_prob=0.2).to(device)
+    decoder = BahdanauDecoder(hidden_size, len(tgt.vocab)).to(device)
     model = Seq2SeqTwoInput(encoder, decoder).cuda()
 
     def init_weights(m):
         for name, param in m.named_parameters():
             if 'weight' in name:
                 # nn.init.normal_(param.data, mean=0, std=0.01)
-                # nn.init.xavier_normal_(param.data)
-                nn.init.xavier_uniform_(param.data)
+                nn.init.xavier_normal_(param.data)
+                # nn.init.xavier_uniform_(param.data)
             else:
                 nn.init.constant_(param.data, 0)
 
     model.apply(init_weights)
+    get_model_size(model)
+    print(f'src vocab = {len(src.vocab)}, tgt vocab = {len(tgt.vocab)}')
 
-    print(next(model.parameters()).is_cuda)
-    print(device)
+    optimizer = optim.Adam(model.parameters(), lr=0.1, betas=(0.9, 0.999))
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.7)
 
-
-    # encoder_optimizer = optim.Adam(encoder.parameters(), lr=lr)
-    # decoder_optimizer = optim.Adam(decoder.parameters(), lr=lr)
-    optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999))
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=1)
-
-    EPOCHS = 2000
-    batch_size = 100
+    EPOCHS = 100
+    batch_size = 25
+    BS = 250
     test_every_epoch = 1
     teacher_forcing_prob = 1
 
@@ -373,8 +420,9 @@ if __name__ == '__main__':
     batch_iterator = torchtext.data.BucketIterator(
         dataset=train_data,
         batch_size=batch_size,
-        sort=False,
+        sort=True,
         repeat=False,
+        shuffle=False,
         sort_within_batch=True,
         sort_key=lambda x: len(x.src_del),
         device=device)
@@ -382,25 +430,42 @@ if __name__ == '__main__':
     test_batch_iterator = torchtext.data.BucketIterator(
         dataset=test_data,
         batch_size=batch_size,
-        sort=False,
+        sort=True,
         repeat=False,
         sort_within_batch=True,
         sort_key=lambda x: len(x.src_del),
         device=device)
 
+    val_batch_iterator = torchtext.data.BucketIterator(
+        dataset=val_data,
+        batch_size=batch_size,
+        sort=True,
+        repeat=False,
+        sort_within_batch=True,
+        sort_key=lambda x: len(x.src_del),
+        device=device)
+
+    start_to_add_data = False
+    number_of_commits_in_train = 47900 
+    break_after_batch = int(number_of_commits_in_train / batch_size)   
     for epoch in tk0:
-        epoch_loss, epoch_bleu = train(model, batch_iterator, optimizer, F.nll_loss)
-        print(epoch_bleu)
+        epoch_loss, epoch_bleu = train(model, batch_iterator, optimizer, F.nll_loss, break_after_batch, ignore_index_loss=pad_index)
         
         if epoch % test_every_epoch == 0:
-            test_loss, test_bleu = evaluate(model, test_batch_iterator, F.nll_loss)
+            test_loss, test_bleu = evaluate(model, test_batch_iterator, F.nll_loss, is_test=True, ignore_index_loss=pad_index)
+            val_loss, val_bleu = evaluate(model, val_batch_iterator, F.nll_loss, ignore_index_loss=pad_index)
             print(f'test bleu = {test_bleu}')
+            if test_bleu > 1.5:
+                start_to_add_data = True
             wandb.log({'train_bleu': epoch_bleu,
                        'train_loss': epoch_loss,
                        'test_loss': test_loss,
-                       'test_bleu': test_bleu})
-            tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu,
-                            test_loss=test_loss, test_bleu=test_bleu)
+                       'test_bleu': test_bleu,
+                       'val_loss': val_loss,
+                       'val_bleu': val_bleu})
+            tk0.set_postfix(train_loss=epoch_loss, train_bleu=epoch_bleu,
+                            test_loss=test_loss, test_bleu=test_bleu,
+                            val_loss=val_loss, val_bleu=val_bleu)
         else:
             wandb.log({'train_bleu': epoch_bleu, 'train_loss': epoch_loss})
             tk0.set_postfix(loss=epoch_loss, train_bleu=epoch_bleu)
@@ -409,6 +474,10 @@ if __name__ == '__main__':
                  "decoder": decoder.state_dict(),
                  "optimizer": optimizer.state_dict()},
                 "./model_nmt.pt") 
+        if start_to_add_data:
+            number_of_commits_in_train += 1000
+            break_after_batch = int(number_of_commits_in_train / BS)
+            
         scheduler.step()
     wandb.save('model_nmt2.h5')
 
